@@ -1,0 +1,971 @@
+---
+title: "Sports analytics"
+output:
+  html_document:
+    theme: paper
+    highlight: monochrome
+    toc: true
+    toc_float: true
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+library(kableExtra)
+library(knitr)
+library(factoextra)
+library(data.table)
+library(datasets)
+library(ggplot2)
+library(ggdendro)
+library(GGally)
+library(caret)
+library(gridExtra)
+library(MASS)
+library(mda)
+library(klaR)
+library(dplyr)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(cluster)
+library(FactoMineR)
+library(factoextra)
+library(foreach)
+library(doSNOW)
+library(doParallel)
+library(NbClust)
+library(mclust)
+DT_body_perf <- fread("bodyPerformance.csv")
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+# Introduction
+
+In this project, a study of exercise performance of the Korean population is carried out. The aim of the project consists of analysing and predicting the performance of the individuals based on different physical tests for a wide range of ages of the population, from 21 to 64 years old. 
+
+Regarding this report, it is divided as follows: firstly, the data set and the justification of the problem are presented. Secondly, the exploratory data analysis is carried out in order to get a better insight of the data set and to take the appropriate measures of correction. Then, different analysis like PCA, LDA, CART and clustering are conducted, but before that, the data is prepared for analysis, which means that it is divided into train and test sample. Finally, the results are discussed.
+
+## Data presentation
+
+```{r Precalc_DP1, echo=FALSE}
+dt_analysis <- copy(DT_body_perf)
+
+setnames(dt_analysis, c("sit and bend forward_cm", "sit-ups counts", "broad jump_cm"),
+                      c("sit.bend_forward_cm","sit.ups_counts","broad_jump_cm"))
+```
+
+The data was obtained from <https://www.kaggle.com/kukuroo3/body-performance-data>. It contains `r nrow(DT_body_perf)` samples, and each one is defined by `r ncol(DT_body_perf) - 1` predictors and a factor/group variable (Class). 
+
+```{r DP_plot1, echo=FALSE}
+kable(head(dt_analysis),align = rep("c", ncol(DT_body_perf))) %>% kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = FALSE)
+summary(dt_analysis)
+```
+
+These predictors could be divided into three groups:
+
+* Personal characteristics: In which the age, gender, weight, height, fat percentage and blood pressure of each individual are recorded.
+
+* Sport performance categories: In which the results obtained in each of the sporting events are recorded:
+  
+  + GripForce: The grip force is measured in kg. This test consists of each individual holding a dynamometer with their dominant hand and applying the highest possible grip force for 5 seconds.
+  
+  + Sit and bend forward: This is a flexibility test that consists of sitting on the floor without passing a mark and the individual has to bend as far forward as possible. Negative values might represent that the individuals could not reach the initial mark.
+
+  + Sit-ups counts: number of complete sit-ups done in a given time.
+  
+  + Broad jump: This is a test in which the length of a static jump is measured. It is measured in cm.
+    
+* Performance: the factor variable `class` evaluates the sporting performance according to the personal characteristics of each person. This variable goes from A to D, being A the best performance and D the worst.
+
+Once all variables are understood, it is necessary to look for missing values, which can be done using `summary` function.
+
+```{r DP_plot1_1, echo=FALSE}
+summary(dt_analysis)
+```
+As it can be observed, there are no `NA` values. Furthermore, besides all these variables, in order to satisfy the requirements of the assignment, it is necessary to have:
+
+- An id 
+- A binary categorical variable
+- Seven numerical variables
+- Two polyatomic categorical variables
+
+Therefore, in this case, the id and another categorical variable are created as follows.
+
+```{r Varcreation,echo=TRUE}
+dt_analysis[,ID := 1:.N]
+setcolorder(dt_analysis,"ID")
+
+dt_fat <- data.table(Range1 = c(0,20,34,40),Range2 = c(20,34,40,100), catFat = 
+                       c("low fat","healthy","overweight","obese"))
+
+dt_analysis[`body fat_%` < 20, catFat := "low fat"][`body fat_%`>= 20 & 
+           `body fat_%` < 34, catFat := "healthy"]
+dt_analysis[`body fat_%` >= 34 & `body fat_%` < 40, catFat := 
+          "overweight"][`body fat_%` >= 40, catFat := "obese"]
+
+dt_analysis[, `body fat_%` := NULL]
+``` 
+
+In the following tables, the ranges established for the polyatomic categorical variable are presented.
+
+```{r VarcreationTabla, echo = FALSE, fig.align='center'}
+
+kable(dt_fat, align = rep("c", ncol(dt_fat)),caption = "Body fat categorization") %>% 
+      kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+
+```
+
+Additionally, `gender`, `class` and `catFat` predictors are set as factors.
+
+```{r DataArrengement, echo = FALSE}
+dt_analysis[, gender := as.factor(gender)][, catFat := as.factor(catFat)][, class := as.factor(class)]
+str(dt_analysis)
+```
+
+## Justification
+
+In the recent years, the world is undergoing a digital transformation, where daily large amount of data are recollected in different fields. This data allows to have a better understanding of what is happening and it allows to run predictions. 
+
+A field of interest for this type of data analysis could be sport. These type of tools would allow scouts to identify athletes with a higher potential.Moreover, another important domain could be the physical health monitoring. It would allow to determine reasonable rates for healthy physical conditions.
+
+Within this projects it is intended to carry out the following analyses:
+
+* Determining the difference between genders.
+
+* Determining the variables with higher contribution to the performance.
+
+* Creating the most accurate model in order to predict the performance.
+
+* Determining and identifying the different clusters.
+
+Hence, the aim of this project is to obtain and analyse the results by means of different techniques (PCA, LDA, CART and RF, and clustering).
+
+# Exploratory data analysis
+
+First of all, the summary of the arranged dataset is displayed.
+
+```{r Precalc_DEA1, echo=FALSE}
+tab.gender <- dt_analysis[,.N, by = gender]
+tab.class <- dt_analysis[,.N, by = class]
+setorder(tab.class, class)
+
+g1 <- ggplot(data = dt_analysis, aes(x = gender, y = height_cm, fill = gender)) + geom_boxplot() + theme_bw()
+g2 <- ggplot(data = dt_analysis, aes(x = gender, y = weight_kg, fill = gender)) + geom_boxplot() + theme_bw()
+g3 <- ggplot(data = dt_analysis, aes(x = gender, y = diastolic, fill = gender)) + geom_boxplot() + theme_bw()
+g4 <- ggplot(data = dt_analysis, aes(x = gender, y = systolic, fill = gender)) + geom_boxplot() + theme_bw()
+g5 <- ggplot(data = dt_analysis, aes(x = gender, y = gripForce, fill = gender)) + geom_boxplot() + theme_bw()
+g6 <- ggplot(data = dt_analysis, aes(x = gender, y = sit.bend_forward_cm, fill = gender)) + geom_boxplot() + theme_bw()
+g7 <- ggplot(data = dt_analysis, aes(x = gender, y = `sit.ups_counts`,fill = gender)) + geom_boxplot() + theme_bw()
+g8 <- ggplot(data = dt_analysis, aes(x = gender, y = `broad_jump_cm`,fill = gender)) + geom_boxplot() + theme_bw()
+
+summary(dt_analysis[,-1])
+```
+
+Again, the data does not have missing values, thus, it is not necessary to take correction measures. Moreover, **`r tab.gender[gender == "F",N]`** of the individuals are females, whereas the remaining **`r tab.gender[gender == "M",N]`** are males.
+
+The `class` feature (where A is the best) indicates the grade of performance related to age and some exercise performance data. It is divided as follows:
+
+```{r EDA1, echo=FALSE, fig.align='center'}
+kable(tab.class, align = rep("c", ncol(tab.class)), caption = "Class frequency table") %>% 
+      kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+```
+
+
+Now, it is intended to find possible outliers. Firstly, from the summary, it can be observed that `gender` and `age` features have consistent values. 
+
+Now, the other features are analysed by means of the distribution of the values for each attribute broken down by gender:
+
+```{r EDA3, echo=FALSE, fig.width=10, fig.align='center', fig.height=12}
+grid.arrange(g1,g2,g3,g4,g5,g6,g7,g8, nrow = 4)
+rm(g1,g2,g3,g4,g5,g6,g7,g8)
+```
+
+From the boxplot above, there are some potential outliers that must be investigated. Taking the example of systolic and diastolic, 
+it can be seen how one point exceeds the 3rd quartile. 
+
+Rough conclusions can be drawn:
+
+- Men have a slightly higher systolic and diastolic blood pressure^[Diastolic: blood pressure related to the relaxation process of the heart.  
+Systolic: blood pressure related to the contraction process of the heart.], a greater broad jump and greater strength as well as they can do a higher number of sit-ups.
+- Women are more flexible.
+
+Possible outliers are listed in the table below:
+
+```{r EDA4, echo=FALSE}
+pos.out <- dt_analysis[systolic < 20]
+pos.out <- rbind(pos.out, dt_analysis[gripForce == 0])
+pos.out <- rbind(pos.out, dt_analysis[sit.bend_forward_cm > 50])
+pos.out <- rbind(pos.out, dt_analysis[broad_jump_cm == 0])
+
+kable(pos.out, align = rep("c", ncol(pos.out)),caption = "Possible outliers") %>% 
+      kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+```
+
+The possible outliers are analysed for different reasons:
+
+  - **Blood pressure (diastolic and systolic)**: In this case there are some individuals that have a too low blood pressure. This is probably because of failure of the measurement.
+  
+  
+  - **Grip force**: In this case it can be seen that there are three individuals (2 males and 1 female) that have null values, which could mean that have not done the test. 
+  
+  - **Sit and bend forward**:  In the boxplot of this category, it can be seen that there are two points well above the average in the male gender. Analysing the two ids, 2658 and 3356, it can be seen that two people of 1.65m have reached 2.13m and 1.85m respectively in the flexibility test, so that it is impossible for this situation to occur and therefore it is considered to be a measurement error.
+  
+  - **Broad jump**: Analysing this test shows that there are many null jump values. Looking individually at each of the cases it is concluded that these people have not taken the test.
+
+**All these samples are considered outliers, thus, they are removed from the data set.**
+
+Afterwards, the correlation between numerical variables are presented in the correlation matrix.
+
+  
+```{r EDA5, echo=FALSE, fig.width=10,fig.height=8}
+dt_analysis <- dt_analysis[!(ID %in% pos.out$ID)]
+
+ggpairs(dt_analysis, columns = c(2, 4:11),
+        ggplot2::aes(colour=gender, alpha = 0.7),
+        title="Correlation matrix.")
+```
+
+After plotting the correlation matrix, more precise conclusions can be drawn:
+
+- Again, it can be seen the slightly difference between men and women in the systolic and diastolic blood pressure, where men have higher systolic and diastolic blood pressure. Note that both are pretty correlated. 
+
+- Weight and height are quite correlated, with more effect on men than on women. In contrast, weight and fat are correlated as well, but with more effect on women than on men.
+
+- Gripforce is correlated to physical conditions (weight and height). In this case, men have higher values than women.
+
+- Men have higher values of broad jump, which is highly correlated to sit ups. Probably because both activities require a strong core. Moreover, height and broad jump are also correlated.
+
+- Overall, various attributes are correlated as observed in the matrix correlation graph.
+
+<!-- - Es pot veure com darrera dels diferents atributs del data set hi ha una distribució normal. **Era com un requisit o alguna cosa aixi no menrecordo** -->
+
+<!-- - mujeres tienen menor gripforce y broadjump, estan correladas. El broad jump tambien situps y bodyfat  -->
+  
+<!-- # Preparing data for analysis -->
+
+<!-- The data is divided into train and test samples using the `createDataPartition` function. The train sample is used to train the models, while the test sample is used to validate the models. -->
+
+<!-- ```{r PrepData, echo=TRUE} -->
+<!-- set.seed(123) -->
+<!-- sample.ind <- createDataPartition(dt_analysis$ID, p = 0.8, list = F) -->
+
+<!-- train.sample <- dt_analysis[sample.ind] -->
+<!-- test.sample <- dt_analysis[-sample.ind] -->
+<!-- ``` -->
+
+<!-- Once the samples are divided, it is possible to start creating different models based on different techniques, which are presented in the sections below. -->
+  
+# Principal component analysis 
+
+PCs are calculated by using the `princomp` function. It has to be highlighted that the correlation matrix has been used.
+
+In order to select the principal components, the scree plot, where the percentage of explained variance in front of the components are presented.
+
+```{r Precalc_PCA1, echo=FALSE}
+dt_pca_analysis <- dt_analysis[,.(age,height_cm,weight_kg,diastolic,systolic,gripForce,sit.bend_forward_cm,sit.ups_counts,broad_jump_cm)]
+
+body_perf_pca <- princomp(dt_pca_analysis, cor = T)
+
+
+pr.var <- body_perf_pca$sdev^2 # varianza
+pve <- pr.var/sum(pr.var)
+
+```
+
+```{r PCA1, echo=FALSE}
+fviz_eig(body_perf_pca, barfill = rgb(245/255, 183/255, 177/255), 
+         barcolor = "black", linecolor = "black", addlabels = T)
+```
+
+The first two PCs represent `r round(sum(pve[1:2])*100,1)`% of the original data, while first three PCs are `r round(sum(pve[1:3])*100,1)`%.
+
+
+## Interpretation of PCs
+
+Now, the contribution of each variable on the PCs is presented, as well as their interpretations.
+```{r PCA2, echo=FALSE, message=FALSE}
+# fviz_pca_ind(body_perf_pca, col.ind = "contrib", gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), repel = T)
+fviz_pca_var(body_perf_pca, col.var = "contrib",repel = T, gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"))
+body_perf_pca$loadings
+```
+
+<!-- **treure el plot indiv pq no senten res o posar menys valors** -->
+
+<!-- It can be observed some points: -->
+
+```{r PCA2_1, echo=FALSE, message=FALSE, fig.align='center'}
+dt_analysis[, ID := 1:.N]
+# kable(dt_analysis[c(345,554,2163,8206,8521)], align = rep("c", ncol(dt_analysis))) %>% 
+#       kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+```
+
+The first component gives an overall value of the performance in the tests according to the physical characteristics (height and weight). It should be noted that this component does not take into account the flexibility test.
+
+On the other hand, the second component gives more insight into the health status of the participants, as it provides more information on the age and blood pressure of the individuals.
+
+Finally, the third component mainly captures the flexibility data, as expected since it is the only variable that is not over-represented in the first two components.
+
+
+# Preparing data for analysis
+
+The data is divided into train and test samples using the `createDataPartition` function. The train sample is used to train the models, while the test sample is used to validate the models.
+
+```{r PrepData, echo=TRUE}
+set.seed(123)
+sample.ind <- createDataPartition(dt_analysis$ID, p = 0.8, list = F)
+
+train.sample <- dt_analysis[sample.ind]
+test.sample <- dt_analysis[-sample.ind]
+```
+
+Once the samples are divided, it is possible to start creating different models based on different techniques, which are presented in the sections below.
+
+# Linear discriminant analysis
+
+From previous sections it was observed that sample are equally separated within classes, but let's differentiate by gender after outliers have been removed:
+
+```{r EDA1_1, echo=FALSE}
+ggplot(dt_analysis, aes(x = class, fill = gender)) + geom_bar(stat = "count", position = position_dodge()) + 
+  ggtitle("Class frequency by gender") +
+  theme_bw()
+```
+
+As mentioned, there are more male individuals. Moreover, for all classes except `A` they represent almost 2/3 of the class samples, while the number of male and female individuals are  more similar in `A`.
+
+Now, LDA are carried out in order to predict classes. To do so, the data set has been divided into train and test samples, as explained in previous sections.
+
+```{r Precalc_LDA1, echo=FALSE}
+dt_lda_analysis <- train.sample[,.(age,height_cm,weight_kg,diastolic,systolic,gripForce,sit.bend_forward_cm,sit.ups_counts,broad_jump_cm,class)]
+dt_lda_analysis.test <- test.sample[,.(age,height_cm,weight_kg,diastolic,systolic,gripForce,sit.bend_forward_cm,sit.ups_counts,broad_jump_cm,class)]
+
+# table(class = dt_lda_analysis$class) %>% 
+#     kbl(caption = "Frequency table train sample", align = c("cc")) %>%
+#       kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+```
+
+The linear discriminant analysis is computed by means the function `lda` from *MASS package*, by using the training data subset.
+
+```{r Precalc_LDA2, echo=FALSE}
+(model.lda <- lda(class~., data = dt_lda_analysis))
+```
+From this function, the following statements can be concluded:
+
+- The proportion of training observation in each group is more or less equal, around 25%.
+- By the group means output, the center of gravity of each attribute per class is computed.
+- The linear combination of predictor variables that are used to form the three LDA are presented. 
+- By means of the first linear discriminant is reached more than the 95% of the proportion of trace.
+
+Now, the scatter visualization of the groups created by the LDA model is displayed.
+
+```{r Precalc_LDA3, echo=FALSE}
+data.lda.values <- predict(model.lda)
+plot.data <- data.frame(LD1 = data.lda.values$x[,1],
+                        LD2 = data.lda.values$x[,2],
+                        LD3 = data.lda.values$x[,3],
+                        class = dt_lda_analysis$class)
+
+p1 <- ggplot(plot.data, aes(LD1,LD2)) + geom_point(aes(colour = class)) + theme_bw()
+p2 <- ggplot(plot.data, aes(LD1,LD3)) + geom_point(aes(colour = class)) + theme_bw()
+p3 <- ggplot(plot.data, aes(LD2,LD3)) + geom_point(aes(colour = class)) + theme_bw()
+
+grid.arrange(p1,p2,p3, nrow = 2)
+```
+
+These graphs confirm what has been seen above, where LD1 provides the most information and allows differentiation between classes. 
+
+Once the model is created, the next step consists of running a prediction with the test data.
+
+```{r Precalc_LDA4, echo=TRUE}
+prediction.lda.test <- predict(model.lda,dt_lda_analysis.test)
+c.m.lda <- confusionMatrix(prediction.lda.test$class,as.factor(dt_lda_analysis.test$class))
+c.m.lda$table
+```
+
+The accuracy of the LDA model is `r round(c.m.lda$overall[1]*100,2)`%.
+
+
+## Extensions to LDA
+
+Some extensions of LDA are used in order to see if more accurate models can be obtained.
+
+### Quadratic discriminant analysis
+
+Firstly, the QDA.
+
+```{r qdaMod, echo=FALSE}
+model.qda <- qda(class~., data = dt_lda_analysis)
+prediction.qda <- predict(model.qda,dt_lda_analysis.test)
+c.m.qda <- confusionMatrix(prediction.qda$class,as.factor(dt_lda_analysis.test$class))
+c.m.qda$table
+```
+
+The accuracy of the QDA model is `r round(c.m.qda$overall[1]*100,2)`%.
+
+### Flexible discriminant analysis
+
+Secondly, the FDA.
+
+```{r fdaMod, echo=FALSE}
+model.fda <- fda(class~., data = dt_lda_analysis)
+prediction.fda <- predict(model.fda,dt_lda_analysis.test)
+c.m.fda <- confusionMatrix(prediction.fda,as.factor(dt_lda_analysis.test$class))
+c.m.fda$table
+```
+
+FDA model correctly classified `r round(sum(diag(c.m.fda$table))/sum(c.m.fda$table)*100,2)`% of observations, which is equal to LDA model.
+
+### Regularized discriminant analysis
+
+Afterwards, the RDA.
+
+```{r rdaMod, echo=FALSE}
+# Train model 
+model.rda <- rda(class ~ .,  data = dt_lda_analysis)
+# Make predictions
+prediction.rda <- predict(model.rda,dt_lda_analysis.test)
+# Model accuracy
+acc.rda <- round(mean(prediction.rda$class == dt_lda_analysis.test$class)*100,2)
+c.m.rda <- confusionMatrix(prediction.rda$class,as.factor(dt_lda_analysis.test$class))
+c.m.rda$table
+```
+
+The accuracy of the RDA model is `r acc.rda `%.
+
+### Mixture discriminant analysis
+
+Finally, the MDA.
+
+```{r mdaMod, echo=FALSE}
+model.mda <- mda(class~., data = dt_lda_analysis)
+prediction.mda <- predict(model.mda, dt_lda_analysis.test)
+confusion(model.mda, dt_lda_analysis.test)
+acc.mda <- round(mean(prediction.mda == dt_lda_analysis.test$class)*100,2)
+```
+
+The accuracy of the MDA model is `r acc.mda `%.
+
+
+Analysing LDA models, it can be observed that their accuracy are similar with values close to 60%. In order to find better models, CART and random forest analysis are performed.
+
+# CART and Random forest
+
+Since not all variables are numeric, CART and random forest allow to consider all of them. Firstly, the analysis is carried out considering a single tree, and then with random forest.
+
+## Classification tree
+
+Now all variables except the `ID` are considered. The first step is dividing the samples into training and testing.
+
+```{r CART_1, echo=TRUE}
+train.cart <- train.sample[, c(-1)]
+test.cart <- test.sample[, c(-1)]
+```
+
+The model is used to predict classes. Using `rpart` function, it is possible to obtain the following tree:
+
+```{r CART_2, echo = FALSE}
+classtree.class <- rpart(formula = class ~., method = "class", data = train.cart, cp = 0.01)
+predictive.accuracy <- printcp(classtree.class)
+
+rpart.plot(classtree.class, type = 5)
+```
+
+On the one hand, there are **`r predictive.accuracy[8,2] + 1`** terminal nodes, which are called leaves. On the other hand, the number of splits is **`r predictive.accuracy[8,2]`** , which is the size of the tree and it is always one minus the number of the leaves.
+
+```{r CART_2_1, echo=FALSE, include=FALSE, message=FALSE}
+smm.Model <- summary(classtree.class)
+var.imp <- round(smm.Model[[13]]/sum(smm.Model[[13]])*100,0)
+```
+
+From the classification tree displayed above, it can be seen that the most important predictor is `r names(var.imp)[1]`, followed by `r names(var.imp)[2]`, `r names(var.imp)[3]` and `r names(var.imp)[4]`.
+
+The following table depicts the importance of each variable:
+
+```{r CART_2_2, echo=FALSE}
+n <- 6
+var.imp[1:n] %>% 
+    kbl(caption = paste0("First ",n," most important varibales"), align = rep("cc")) %>%
+      kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+```
+
+It must be aware that the third most important variable is `broad_jump_cm`, however, it does not appear in the decision tree. Nevertheless, since its importance is similar to `gripForce` and both predictors are highly correlated, the obtained decision tree is taken as valid for making predictions.
+
+```{r CART_3, echo=FALSE}
+predict.test <- predict(classtree.class, test.cart, type = "class")
+
+confmatrix <- confusionMatrix(predict.test, test.cart$class)
+confmatrix$table
+```
+
+The accuracy of the decision tree is `r round(confmatrix$overall[1]*100,2)`%, which is a slightly lower than LDA models. The model mostly struggles predicting `C` class.
+
+```{r CART_3_1, echo=FALSE}
+set.seed(123)
+predicted <- round(predict(classtree.class,test.cart),4)*100
+predicted.vs.real <- cbind(predicted, real = as.character(test.cart$class))
+predicted.vs.real <- predicted.vs.real[sample(nrow(predicted),10),]
+
+predicted.vs.real %>% 
+    kbl(caption = "Predicted results vs real ones, 10 random rows", align = c("ccc")) %>%
+      kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+
+```
+
+
+## Random forest
+
+Decision trees is a powerful tool for categorization, but the model can be improved even more using random forest, since this method uses multiple trees. In this case, it has been decided to create different models considering different number of variables tied at each split `for(i in 2:6)`. All the models are displayed below:
+
+
+```{r RF1, echo=FALSE}
+ncores_1loop <- detectCores() - 2
+cluster0 <- makeCluster(ncores_1loop, type = "SOCK")
+registerDoSNOW(cluster0)
+RF.models <- foreach(i = 2:6, .packages = "randomForest")%dopar%{
+  model.RF.check <- randomForest(class ~., data = train.cart, ntree = 1000, mtry = i)
+  return(model.RF.check)
+}
+stopCluster(cluster0)
+
+RF.models
+```
+
+The model with less estimate of error rate is the one with 6 variables at each split. Now, let's see how many trees would be necessary.
+
+```{r RF2, echo=FALSE}
+model.RF <- randomForest(class ~., data = train.cart, ntree = 1000, mtry = 6)
+p <- plot(model.RF, main = "Six variables at each split")
+```
+
+
+It can be observed that the error rate from 300 trees remains almost constant, therefore, using more trees would be a waste of computational resources. 
+
+Now, the predictions are run with the random forest model considering 6 variables per split and 300 trees.
+
+```{r RF_3, echo=FALSE}
+rm(model.RF)
+model.RF <- randomForest(class ~., data = train.cart, ntree = 300, mtry = 6)
+predict.test_RF <- predict(model.RF, test.cart, type = "class")
+
+confmatrix_RF <- confusionMatrix(predict.test_RF, test.cart$class)
+confmatrix_RF$table
+acc.RF <- confmatrix_RF$overall[1]
+names(acc.RF) <- NULL
+```
+
+Now, the accuracy of the model is `r round(acc.RF*100,2)`%. 
+
+# Clustering
+
+The last part of this project consists of clustering. The case study of this method will be divided into three main methods: `Hierarchical`, `K-means` and `Model-based` clustering as well as a mixture of them.
+
+The main objective of clustering is to classify the data set into groups with similar attributes. 
+
+In order to reduce computational time and being able to understand the results, it has been decided to carry out the analysis considering only 1000 random samples. 
+
+It must be aware that clustering is based on distances. Therefore, only numeric variables are considered and they must be scaled in order to avoid dominance of some variables over others. Only for hierarchical and k-means cluster is necessary, however, this is done throughout all analysis, since it will allow to make comparisons.  
+
+```{r CL_1, echo=FALSE, message=FALSE, include=FALSE}
+rm(c.m.fda,c.m.lda,c.m.qda,classtree.class,cluster0,confmatrix,confmatrix_RF,data.lda.values,
+   dt_fat,dt_lda_analysis,dt_lda_analysis.test,dt_pca_analysis, model.fda, model.mda,model.qda,
+   model.rda,model.RF,p1,p2,p3,plot.data,pos.out,prediction.lda.test,prediction.qda,prediction.rda,
+   RF.models,smm.Model,train.cart,test.cart, model.lda, c.m.rda, tab.class,tab.gender)
+gc()
+```
+
+```{r CL_1_1, echo=FALSE}
+set.seed(123)
+ind <- sample(1:nrow(dt_analysis), 1000)
+dt_clustering <- dt_analysis[ind, c(2, 4:11)]
+dt_clustering <- data.table(scale(dt_clustering))
+```
+
+The summary of the data subset is displayed below.
+
+```{r CL_1_2, echo=FALSE}
+summary(dt_clustering)
+```
+
+Once variables have been scaled, it can be observed that the mean of each predictor is zero. Moreover, the standard deviation is one, as it can be checked below.
+
+```{r CL_1_3,echo=TRUE}
+apply(dt_clustering, 2, sd)
+```
+
+Now that the variables are scaled, the next step consists of computing the distance matrix using the `euclidean` method.
+
+```{r CL_1_4, echo=TRUE}
+dt_clustering.D <- dist(dt_clustering, method = "euclidean")
+```
+
+## Agglomerative hierarchical clustering
+
+Taking into consideration that `agnes` and `hclust` are quite similar models, it has been decided to use only the first one, since it provides information about the agglomerative coefficient, which measures the amount of clustering structure. Note that closer values to 1 suggest strong clustering structures.
+
+All linkage methods are compared in order to obtain the maximum agglomerative coefficient.
+
+```{r CL_2_2, echo=FALSE}
+m <- c("average", "single", "complete", "ward")
+names(m) <- c( "average", "single", "complete", "ward")
+ac <- function(x) {
+  agnes(dt_clustering.D, method = x)$ac
+}
+
+cluster0 <- makeCluster(ncores_1loop,type = "SOCK")
+registerDoSNOW(cluster0)
+ac.all <- foreach(i = 1:length(m), .packages = "cluster",.combine = c)%dopar%{
+  agl.coef <- ac(m[i])
+  names(agl.coef) <- m[i]
+  return(agl.coef)
+}
+stopCluster(cluster0)
+ac.all
+```
+
+As ward method has the highest agglomerative coefficient (strongest clustering structure), it is used to carry out the analysis. So, the dendrogram is created using ward method.
+
+```{r CL_2_3, echo=FALSE}
+dendro_data_k <- function(hc, k) {
+
+  hcdata    <-  ggdendro::dendro_data(hc, type = "rectangle")
+  seg       <-  hcdata$segments
+  labclust  <-  cutree(hc, k)[hc$order]
+  segclust  <-  rep(0L, nrow(seg))
+  heights   <-  sort(hc$height, decreasing = TRUE)
+  height    <-  mean(c(heights[k], heights[k - 1L]), na.rm = TRUE)
+#
+  for (i in 1:k) {
+    xi      <-  hcdata$labels$x[labclust == i]
+    idx1    <-  seg$x    >= min(xi) & seg$x    <= max(xi)
+    idx2    <-  seg$xend >= min(xi) & seg$xend <= max(xi)
+    idx3    <-  seg$yend < height
+    idx     <-  idx1 & idx2 & idx3
+    segclust[idx] <- i
+  }
+
+  idx                    <-  which(segclust == 0L)
+  segclust[idx]          <-  segclust[idx + 1L]
+  hcdata$segments$clust  <-  segclust
+  hcdata$segments$line   <-  as.integer(segclust < 1L)
+  hcdata$labels$clust    <-  labclust
+
+  hcdata
+}
+
+agnes.ward <- agnes(dt_clustering.D, method = "ward")
+dg.agnes.data <- dendro_data_k(agnes.ward, 4)
+
+ggplot(segment(dg.agnes.data)) + 
+  ggtitle("Dendrogram of agnes, method = ward") +
+  geom_segment(aes(x = x, y = y, xend = xend, yend = yend) , show.legend = FALSE) +
+  geom_hline(yintercept = 32, linetype = 2) +
+  theme_bw()
+```
+
+Cutting the dendrogram at a height of 32, it is possible to identify four branches, therefore, four clusters are considered as initial hypothesis. However, this will be studied in more detail in posterior sections. 
+
+Now, let's try to visualize clusters more clearly.
+
+```{r CL_2_4, echo=FALSE}
+ggplot(segment(dg.agnes.data)) + 
+  ggtitle("Dendrogram of agnes, method = ward, k = 4") +
+  geom_segment(aes(x = x, y = y, xend = xend, yend = yend, colour = factor(clust)), show.legend = FALSE) +
+  theme_bw()
+```
+
+### Hierarchical clustering on principal components
+
+Another approach is combining PCA and later apply clustering methods in the case of continuous variables. By means of adding the PCA step before, noise can be mitigated leading to a more stable clustering.
+
+```{r CL_3, echo=FALSE, message=FALSE}
+res.pca <- PCA(dt_clustering, ncp = 3, graph = FALSE)
+res.hcpc <- HCPC(res.pca, graph = FALSE)
+```
+
+A simple way to decide the number of clusters is using the inertia plot. 
+
+In the inertia plot shown below, it can be seen that four is the optimal number of clusters. From 4 to 5 clusters, it has been assessed that there are no important losses. Note that is the same number as the one defined in the previous section.
+
+Another approach to remark is that it has been considered three PCs to carry out the analysis as they represent `r round(res.pca$eig[3,3],0)`% of the variance of the data.
+
+```{r CL_3_1, echo=FALSE, message=FALSE, warning=FALSE}
+plot(res.hcpc, choice="bar")
+unique(res.hcpc$data.clust$clust)
+```
+
+Afterwards, the dendrogram and the individuals factor map are displayed below.
+
+```{r CL_3_2, echo=FALSE, message=FALSE, warning=FALSE}
+# Dendrogram
+fviz_dend(res.hcpc, cex = 0.6, palette = "Set2", show_labels = FALSE,
+          rect = TRUE, rect_border = "Set2", rect_fill = TRUE, ggtheme = theme_bw()) + 
+          guides(scale = "none")
+# Individuals factor map 
+fviz_cluster(res.hcpc,
+             repel = TRUE,            # Avoid label overlapping
+             show.clust.cent = TRUE, # Show cluster centers
+             palette = "Set2",     # Color palette see ?ggpubr::ggpar
+             ggtheme = theme_bw(),
+             main = "Hierarchical clustering on principal components individual factor map")
+```
+
+Additionally, the mean of each variable per cluster is presented. It can be observed the difference between clusters is quite pronounced.
+
+```{r CL_3_3, echo=FALSE, message=FALSE}
+dt_res.hier <- aggregate(dt_clustering, by = list(cluster = res.hcpc$data.clust$clust), mean)
+
+kable(dt_res.hier, align = rep("c", ncol(dt_res.hier))) %>% 
+      kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+```
+
+<!-- Some conclusions can be drawn from the means of each cluster: -->
+
+<!-- * **Cluster 1**: Older, smaller and lighter people with low performance on physical activities. Probably older women.  -->
+
+<!-- * **Cluster 2**: Younger, smaller, lighter people with low pressure and low performance on physical activities except flexibility Probably young women. -->
+
+<!-- * **Cluster 3**: slightly over average age -->
+
+<!-- * **Cluster 4**: -->
+
+## Partitioning clustering: k-means {.tabset}
+
+The next method used to study clustering is k-means. In this case, it is necessary to define the number of clusters previously, therefore, the results for different number of clusters represented. 
+
+<!-- **tambe s'ha de tenir en compte que aquest metode es sensible a les condicions incicials, és a dir, el center cluster que s'ha posat de manera random.** -->
+
+The final k-means clustering solution is very sensitive to this initial conditions. In other words, the result might be slightly different each time you compute k-means as this method selects initial centroids randomly.
+
+```{r CL_5, echo=FALSE}
+set.seed(123)
+
+k <- lapply(2:5, function(x) kmeans(dt_clustering, centers = x, nstart = 25))
+
+plot.k <- lapply(1:4, function(x) fviz_cluster(k[[x]], data = dt_clustering, palette = "Set2",
+                                               geom = "point", pointsize = 0.75, how.clust.cent = TRUE,
+                                               ggtheme = theme_bw(), main = "Factor map"))
+
+grid.arrange(plot.k[[1]], plot.k[[2]], plot.k[[3]], plot.k[[4]], nrow = 2)
+```
+
+In the figure above it can be seen that the samples can be clearly differentiated in two, three and four clusters. However, for five clusters, they start overlapping. In order to estimate the optimal number of clusters, different methods are used.
+
+### Elbow method
+
+Firstly, the Elbow method for k-means is computed. As it can be seen in the graph, the elbow point corresponds to 4 clusters. From 4 clusters onwards, the total within sum of the square curve decreases more slowly.
+
+```{r CL_5_1, echo=FALSE}
+fviz_nbclust(dt_clustering, kmeans, method = "wss") +
+geom_vline(xintercept = 4, linetype = 2)
+```
+
+### Silhouette method
+
+Another method is the average silhouette method. It determines how well each object lies within its cluster. In this case, the optimal number of clusters is the one that maximizes the average silhouette, where the silhouette coefficient for a sample is $\frac{b-a}{max(a,b)}$. Hence, for this particular case study, the optimal number of clusters is 2.
+
+```{r CL_5_2, echo=FALSE}
+fviz_nbclust(dt_clustering, kmeans, method = "silhouette")
+```
+
+### Gap statistic method
+
+In contrast to the methods mentioned before, the gap statistic is a statistical testing method, which means comparing evidence against null hypothesis. It can be visualized by using the `fviz_gap_stat` function. This method suggests 6 as the optimal number of clusters.
+
+```{r CL_5_3, echo=FALSE, message=FALSE, warning=FALSE}
+gap_stat <- clusGap(dt_clustering, FUN = kmeans, nstart = 50, K.max = 6, B = 50)
+fviz_gap_stat(gap_stat)
+```
+
+### Nbclust
+
+The final model assessment is carried out by using the `NbClust` package. It provides 30 indices for determining the relevant number of clusters. As it can be seen in the summary, most of the validation approaches suggest 2 as the number of optimal clusters. 
+
+```{r CL_5_4, echo=FALSE}
+nb <- NbClust(dt_clustering, distance = "euclidean", min.nc=2, max.nc=10, method="kmeans")
+```
+ 
+### Comparison
+
+To sum up, it has been obtained the following models results:
+ 
+ - Silhouette method and NbClust suggest 2 as the number of optimal clusters.
+ - The Elbow point corresponds to 4 clusters.
+ - Gap statistic method proposes 6 as the number of optimal clusters.
+ 
+However, the most important method is the common sense of the clusters. For this reason, the mean and the cluster sizes are computed.
+
+Regarding to the size of the clusters, both cases are reasonable.
+ 
+```{r CL_5_5, echo=FALSE}
+size.clust <- data.table(`2 clusters` = c(k[[1]]$size, "-", "-"), `4 clusters` = k[[3]]$size )
+
+kable(size.clust, align = rep("c", ncol(size.clust))) %>% 
+      kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+```
+ 
+Now, let's look at the means. Dividing the dataset into 2 clusters.
+
+```{r CL_5_6, echo=FALSE}
+means.2clust <- data.table(Cluster = c(1:2), k[[1]]$centers)
+
+kable(means.2clust, align = rep("c", ncol(means.2clust))) %>% 
+      kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+```
+
+Dividing the dataset into 4 clusters.
+
+```{r CL_5_7, echo=FALSE}
+means.4clust <- data.table(Cluster = c(1:4), k[[3]]$centers)
+
+kable(means.4clust, align = rep("c", ncol(means.4clust))) %>% 
+      kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+```
+
+As the majority of the means of the predictors of the 4 clusters differs, it has been considered convenient to divide the dataset into 4 clusters.
+
+<!-- **que diuen els clusters** -->
+
+
+<!-- Some conclusions can be drawn from the means of each cluster: -->
+
+<!-- * **Cluster 1**: Older, smaller and lighter people with low performance on physical activities. Probably older women.  -->
+
+<!-- * **Cluster 2**: Younger, smaller, lighter people with low pressure and low performance on physical activities except flexibility Probably young women. -->
+
+<!-- * **Cluster 3**: slightly over average age -->
+
+<!-- * **Cluster 4**: -->
+
+```{r CL_5_8, echo=FALSE}
+plot.k[[3]]
+```
+ 
+## Hierarchical k-means clustering
+
+Another approach is the combination of the hierarchical method and the k-means one. As it is mentioned before, a limitation of the k-means clustering is the dependence to the initial conditions, as it selects initial centroids randomly. Hence, a solution to improve this limitation is to mix both methods.
+
+The algorithm is summarized into:
+
+1. Compute hierarchical clustering and cut the tree into k-clusters.
+2. Compute the centroid of each cluster.
+3. Compute k-means method by means of the set of cluster centers defined previously as the initial cluster centers.
+
+The dendrogram as well as the hierarchical k-means clusters are displayed below.
+
+```{r CL_6, echo=FALSE, message=FALSE, warning=FALSE}
+res.hk <- hkmeans(dt_clustering, 4)
+
+fviz_dend(res.hk, cex = 0.6, palette = "Set2", show_labels = FALSE,
+          rect = TRUE, rect_border = "Set2", rect_fill = TRUE, ggtheme = theme_bw()) + 
+  guides(scale = "none")
+
+fviz_mclust(res.hk, "classification", geom = "point", 
+            pointsize = 0.75, palette = "Set2", ggtheme = theme_bw())
+```
+ 
+## Model-based clustering
+
+Finally, the last method is the model-based clustering. It consists of a soft clustering, which means that each data point has a probability of belonging to each cluster. 
+
+The added value of this method is the different possible parametrizations of the clusters providing properly identification of them, since the data is considered as coming from a mixture of Gaussian distribution models.
+
+It must be remarked that the algorithm uses a principal component analysis to reduce the dimensionality of the data as the dataset has more than two variables.
+
+```{r CL_7, echo=FALSE}
+mc <- Mclust(dt_clustering)
+summary(mc)
+```
+
+For this data, it can be seen that the model-based clustering selects a model with `r mc$G` clusters. The optimal selected model name is `r mc$modelName` model, which means ellipsoidal, equal shape and orientation.
+
+```{r incluirfoto, echo=FALSE, include = TRUE, out.width="25%", out.hight="25%", fig.align = "center", fig.cap="Ellipsoidal, equal shape and orientation, VEE",eval=FALSE}
+knitr::include_graphics("/Volumes/GoogleDrive/La meva unitat/2B/AEDA/PROJECT/VEE.png")
+```
+
+In order to estimate the number of clusters, the model-based clustering usually uses the BIC parameter, which depends on the number of parameters in the model. 
+
+The BIC values used for choosing the number of clusters is presented below.
+
+```{r CL_7_1, echo=FALSE, warning=FALSE}
+#fviz_mclust(mc, "BIC", palette = "Set2")
+fviz_mclust_bic(mc, model.names=mc$modelName, palette = "Set2")
+```
+
+The model-based clusters are presented below.
+
+```{r CL_7_3, echo=FALSE}
+fviz_mclust(mc, "classification", geom = "point", 
+            pointsize = 0.75, palette = "Set2", ggtheme = theme_bw())
+```
+
+As it can be seen in the figure, five clusters induce to an overlapping. Thus, let's compute the size of each cluster.
+
+```{r CL_7_4, echo=FALSE}
+table(mc$classification)
+```
+
+The size of cluster number two is rather small, thus, the number of clusters is forced to be 4. Below is displayed the summary.
+
+```{r CL_7_5, echo=FALSE}
+mc.G4 <- Mclust(dt_clustering, G=4)
+summary(mc.G4)
+```
+
+The four model-based clusters are presented below.
+
+```{r CL_7_5_1, echo=FALSE}
+fviz_mclust(mc.G4, "classification", geom = "point",
+            pointsize = 0.75, palette = "Set2", ggtheme = theme_bw())
+```
+
+In this case, the parametrization of the clusters is carried out by the `r mc.G4$modelName` model (ellipsoidal, equal volume, shape and orientation.
+
+The probabilities to belong to a given cluster of 15 random samples are listed below.
+
+```{r CL_7_6, echo=FALSE}
+  mcz.sample <- (mc.G4$z)  %>%
+  as.data.frame(.) %>% 
+  data.table(.)
+  mcz.sample[, Cluster := mc.G4$classification]
+  setnames(mcz.sample, c(1:5), c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4", "Cluster"))
+  
+  mcz.sample %>% 
+  sample_n(., 15, replace=FALSE) %>% 
+  kable(caption = "Probability to belong to a given cluster (sample of 15)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = FALSE)
+```
+
+<!-- **que diuen els clusters** -->
+
+```{r CL_7_7, echo=FALSE}
+means.4clust.mb <- data.table(Cluster = c(1:4), t(mc.G4$parameters$mean))
+
+kable(means.4clust.mb, align = rep("c", ncol(means.4clust.mb))) %>% 
+      kable_styling(bootstrap_options = c("striped", "condensed", "responsive"), full_width = F)
+```
+
+<!-- **en els 4 casos, s'ha trobat la mateixa divisió entre clusters encara que es pot veure com varien algunes samples entre clusters i metodes (es pot veure als valors de les mitjanes presentades anteriorment).** -->
+
+Some conclusions can be drawn from the means of each cluster:
+
+* **Cluster 1**: Older, smaller and lighter people with low performance on physical activities. Probably old women.
+
+* **Cluster 2**: Older, taller, heavier people with higher blood pressure and bad performance. Probably old men.
+
+* **Cluster 3**: Younger, smaller, lighter people with low pressure and low performance on physical activities except flexibility. Probably young women.
+
+* **Cluster 4**: Younger, taller and heavier people with good physical performance, but with low flexibility. Probably young men.
+
+# Conclusions
+
+To sum up, all the objectives of the project have been fulfilled, since it has been possible to conduct different analysis using 
+different techniques such as PCA, LDA, CART clustering.
+
+On the one hand, for supervised methods, the model with the highest accuracy is random forest, up to 72%. Note that in this case the output was a categorical value, therefore, miss-classification between categories is not so relevant as in binary cases.
+
+On the other hand, two different analysis have been carried out for unsupervised methods. Regarding PCA, the first two PCs represent `r round(sum(pve[1:2])*100,1)`% of the original data, while first three PCs are `r round(sum(pve[1:3])*100,1)`%. 
+
+Finally, the data set has been divided into four different clusters based on age and gender.
+
+
+
